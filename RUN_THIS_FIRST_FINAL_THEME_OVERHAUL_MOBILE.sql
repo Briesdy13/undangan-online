@@ -210,3 +210,15 @@ for update using (bucket_id in ('invitation-gallery','invitation-music'))
 with check (bucket_id in ('invitation-gallery','invitation-music'));
 create policy "public delete invitation files" on storage.objects
 for delete using (bucket_id in ('invitation-gallery','invitation-music'));
+
+
+-- FINAL MOBILE FOOTER DEFAULT
+alter table invitations add column if not exists father_name text;
+alter table invitations add column if not exists mother_name text;
+alter table invitations add column if not exists family_name text;
+alter table invitations add column if not exists closing_text text;
+
+update invitations
+set family_name = 'KELUARGA BESAR BAPAK MUCHTAR'
+where slug = 'khitan-fathir'
+  and (family_name is null or family_name = '' or family_name ilike '%Fathir%');

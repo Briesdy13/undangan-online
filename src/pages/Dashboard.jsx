@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   addInvitation, deleteInvitation, getInvitations, getSongs, updateSong, addSong, deleteSong,
-  updateInvitation, uploadGalleryFile, uploadSongFile, refreshRemoteData, validateMusicUrl,
+  updateInvitation, uploadGalleryFile, uploadSongFile, deleteStorageFile, refreshRemoteData, validateMusicUrl,
   subscribeLiveUpdates, waitForSync, getSupabaseStatus, makeId
 } from "../lib/storage";
 import { templates, featureAccess } from "../lib/seedData";
@@ -20,6 +20,10 @@ const newInvitation = () => ({
   title: "Undangan Khitanan",
   childName: "FATHIR IBRAHIM MUCHTAR",
   nickname: "BA'IM",
+  fatherName: "Bpk. Muchtar",
+  motherName: "Ibu Linah Apriyanti",
+  familyName: "KELUARGA BESAR BAPAK MUCHTAR",
+  closingText: "Merupakan suatu kehormatan dan kebahagiaan bagi kami apabila Bapak/Ibu/Saudara/i berkenan hadir dan memberikan doa restu.",
   eventType: "Khitanan",
   eventDay: "Minggu",
   eventDate: "2026-06-28",
@@ -35,11 +39,12 @@ const newInvitation = () => ({
   bankAccount: "1234567890",
   bankOwner: "Briesdy Branstanata",
   mainPhoto: "/fathir.jpeg",
-  gallery: ["/fathir.jpeg"],
+  gallery: [],
   guests: ["Bapak Budi"],
   rsvps: [],
   wishes: [],
   checkins: [],
+  timeline: [],
   createdAt: new Date().toISOString(),
   publishedAt: new Date().toISOString(),
 });
@@ -117,29 +122,84 @@ export default function Dashboard() {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     setBusy(true);
-    const urls = [];
+    const nextItems = [];
     for (const file of files) {
       const url = await uploadGalleryFile(file);
-      if (url) urls.push(url);
+      if (url) nextItems.push({ id: makeId(), imageUrl: url, sortOrder: (data.gallery || []).length + nextItems.length, caption: "", createdAt: new Date().toISOString() });
     }
-    if (urls.length) {
-      const gallery = [...(data.gallery || []), ...urls];
-      updateInvitation(data.id, { gallery, mainPhoto: data.mainPhoto || urls[0] });
+    if (nextItems.length) {
+      const gallery = [...(data.gallery || []), ...nextItems];
+      updateInvitation(data.id, { gallery, mainPhoto: data.mainPhoto || nextItems[0].imageUrl });
     }
-    await syncNow(urls.length ? "Foto tersimpan ke Supabase." : "");
+    e.target.value = "";
+    await syncNow(nextItems.length ? "Foto tersimpan ke Supabase Storage dan database." : "");
+  };
+
+  const editGallery = async (index, file) => {
+    if (!data || !file) return;
+    setBusy(true);
+    const old = (data.gallery || [])[index];
+    const oldUrl = typeof old === "string" ? old : old?.imageUrl;
+    const newUrl = await uploadGalleryFile(file);
+    if (!newUrl) { await syncNow(""); return; }
+    const gallery = [...(data.gallery || [])];
+    gallery[index] = { ...(typeof old === "object" ? old : {}), id: old?.id || makeId(), imageUrl: newUrl, sortOrder: old?.sortOrder ?? index, updatedAt: new Date().toISOString() };
+    const mainPhoto = data.mainPhoto === oldUrl ? newUrl : data.mainPhoto;
+    updateInvitation(data.id, { gallery, mainPhoto });
+    await deleteStorageFile(oldUrl);
+    await syncNow("Foto berhasil diedit dan tersimpan permanen.");
   };
 
   const deleteGallery = async (index) => {
+    if (!data || !confirm("Hapus foto ini dari dashboard, frontend, database, dan storage?")) return;
     const gallery = [...(data.gallery || [])];
-    gallery.splice(index, 1);
-    const mainPhoto = gallery.includes(data.mainPhoto) ? data.mainPhoto : (gallery[0] || "");
-    updateInvitation(data.id, { gallery, mainPhoto });
-    await syncNow("Foto dihapus dari Supabase.");
+    const removed = gallery.splice(index, 1)[0];
+    const removedUrl = typeof removed === "string" ? removed : removed?.imageUrl;
+    const normalized = gallery.map((g, i) => typeof g === "string" ? { id: makeId(), imageUrl: g, sortOrder: i } : { ...g, sortOrder: i });
+    const mainPhoto = removedUrl && data.mainPhoto === removedUrl ? ((normalized[0]?.imageUrl) || "") : data.mainPhoto;
+    updateInvitation(data.id, { gallery: normalized, mainPhoto });
+    await deleteStorageFile(removedUrl);
+    await syncNow("Foto dihapus dari Supabase dan Storage.");
   };
 
-  const setAsCover = async (url) => {
+  const setAsCover = async (item) => {
+    const url = typeof item === "string" ? item : item?.imageUrl;
     save({ mainPhoto:url });
-    await syncNow("Cover tersimpan.");
+    await syncNow("Cover tersimpan ke database.");
+  };
+
+
+  const addTimeline = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    const item = {
+      id: makeId(),
+      time: String(f.get("time") || "").trim(),
+      title: String(f.get("title") || "").trim(),
+      description: String(f.get("description") || "").trim(),
+      icon: String(f.get("icon") || "").trim(),
+      sortOrder: Number(f.get("sortOrder") || ((data.timeline || []).length + 1)),
+      createdAt: new Date().toISOString(),
+    };
+    if (!item.time && !item.title && !item.description) return;
+    updateInvitation(data.id, { timeline: [...(data.timeline || []), item].sort((a,b)=>Number(a.sortOrder||0)-Number(b.sortOrder||0)) });
+    e.currentTarget.reset();
+    await syncNow("Timeline ditambahkan ke Supabase.");
+  };
+
+  const editTimeline = async (index, patch) => {
+    const timeline = [...(data.timeline || [])];
+    timeline[index] = { ...timeline[index], ...patch, sortOrder: patch.sortOrder !== undefined ? Number(patch.sortOrder || 0) : timeline[index]?.sortOrder };
+    updateInvitation(data.id, { timeline: timeline.sort((a,b)=>Number(a.sortOrder||0)-Number(b.sortOrder||0)) });
+    await syncNow("Timeline di-update di Supabase.");
+  };
+
+  const deleteTimeline = async (index) => {
+    if (!confirm("Hapus item timeline ini?")) return;
+    const timeline = [...(data.timeline || [])];
+    timeline.splice(index, 1);
+    updateInvitation(data.id, { timeline: timeline.map((t,i)=>({ ...t, sortOrder: t.sortOrder ?? i })) });
+    await syncNow("Timeline dihapus dari Supabase.");
   };
 
   const addGuest = async (e) => {
@@ -241,7 +301,7 @@ export default function Dashboard() {
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
   };
 
-  const tabs = [["data","Data Acara"],["gallery","Galeri Foto Upload"],["theme","Theme Selector"],["guests","Daftar Tamu"],["rsvp","RSVP Masuk"],["wishes","Ucapan Masuk"],["gift","Amplop Digital"],["music","Music Background"],["publish","Preview & Publish"],["checkin","Data Kehadiran"]];
+  const tabs = [["data","Data Acara"],["gallery","Galeri Foto Upload"],["timeline","Susunan Acara"],["theme","Theme Selector"],["guests","Daftar Tamu"],["rsvp","RSVP Masuk"],["wishes","Ucapan Masuk"],["gift","Amplop Digital"],["music","Music Background"],["publish","Preview & Publish"],["checkin","Data Kehadiran"]];
 
   if (busy && !data) return <main className="admin-page"><section className="panel glass"><h1>Loading Supabase...</h1></section></main>;
 
@@ -284,6 +344,10 @@ export default function Dashboard() {
           <div className="panel glass"><h2>Data Acara</h2><div className="form-grid">
             <label className="label">Nama Anak<input className="input" value={data.childName || ""} onChange={(e)=>save({childName:e.target.value})}/></label>
             <label className="label">Nama Panggilan<input className="input" value={data.nickname || ""} onChange={(e)=>save({nickname:e.target.value})}/></label>
+            <label className="label">Nama Ayah<input className="input" value={data.fatherName || ""} onChange={(e)=>save({fatherName:e.target.value})}/></label>
+            <label className="label">Nama Ibu<input className="input" value={data.motherName || ""} onChange={(e)=>save({motherName:e.target.value})}/></label>
+            <label className="label">Nama Keluarga Besar<input className="input" value={data.familyName || ""} onChange={(e)=>save({familyName:e.target.value})}/></label>
+            <label className="label">Kata Penutup<textarea className="input" rows="4" value={data.closingText || ""} onChange={(e)=>save({closingText:e.target.value})}/></label>
             <label className="label">Slug Link<input className="input" value={data.slug || ""} onChange={(e)=>save({slug:e.target.value.toLowerCase().replaceAll(" ","-")})}/></label>
             <label className="label">Hari<input className="input" value={data.eventDay || ""} onChange={(e)=>save({eventDay:e.target.value})}/></label>
             <label className="label">Tanggal Tampil<input className="input" value={data.eventDateText || ""} onChange={(e)=>save({eventDateText:e.target.value})}/></label>
@@ -298,7 +362,30 @@ export default function Dashboard() {
           </div></div>
         </div>}
 
-        {tab==="gallery" && <div className="panel glass"><h2>Galeri Foto Upload</h2><input className="input" type="file" multiple accept="image/*" onChange={uploadGallery}/><div className="gallery-admin" style={{marginTop:16}}>{(data.gallery||[]).map((url,i)=><div className="guest-card" key={`${url}-${i}`}><img src={url || "/fathir.jpeg"} onError={(e)=>{e.currentTarget.src="/fathir.jpeg"}}/><button className="mini-btn" onClick={()=>setAsCover(url)}>Jadikan Cover</button><button className="mini-btn danger" onClick={()=>deleteGallery(i)}>Delete</button></div>)}</div></div>}
+        {tab==="gallery" && <div className="panel glass">
+          <h2>Galeri Foto Upload</h2>
+          <p className="hint">Dashboard sekarang membaca URL asli dari Supabase/database. Add menambah foto baru, Edit mengganti foto dipilih, Delete menghapus foto dipilih.</p>
+          <input className="input" type="file" multiple accept="image/*" onChange={uploadGallery}/>
+          <div className="gallery-admin" style={{marginTop:16}}>
+            {(data.gallery||[]).map((item,i)=>{
+              const url = typeof item === "string" ? item : (item?.imageUrl || item?.url || "");
+              const key = typeof item === "string" ? `${item}-${i}` : (item?.id || `${url}-${i}`);
+              return <div className="guest-card" key={key}>
+                <img src={url || "/fathir.jpeg"} onError={(e)=>{e.currentTarget.src="/fathir.jpeg"}}/>
+                <div className="gallery-actions">
+                  <button className="mini-btn" onClick={()=>setAsCover(item)}>Jadikan Cover</button>
+                  <label className="mini-btn">Edit Foto
+                    <input type="file" accept="image/*" style={{display:"none"}} onChange={(e)=>editGallery(i, e.target.files?.[0])}/>
+                  </label>
+                  <button className="mini-btn danger" onClick={()=>deleteGallery(i)}>Delete</button>
+                </div>
+              </div>
+            })}
+          </div>
+        </div>}
+
+
+        {tab==="timeline" && <div className="panel glass"><h2>Susunan Acara / Timeline Acara</h2><p className="hint">Data timeline full dari Supabase. Jika kosong, frontend menampilkan "Belum ada susunan acara".</p><form className="form-grid" onSubmit={addTimeline}><label className="label">Jam Acara<input className="input" name="time" placeholder="10.00 WIB"/></label><label className="label">Judul Acara<input className="input" name="title" placeholder="Pembukaan"/></label><label className="label">Deskripsi<input className="input" name="description" placeholder="Deskripsi acara"/></label><label className="label">Icon Opsional<input className="input" name="icon" placeholder="✨"/></label><label className="label">Sort Order<input className="input" type="number" name="sortOrder" defaultValue={(data.timeline||[]).length+1}/></label><button className="btn success">+ Tambah Acara</button></form><div className="timeline-admin">{(data.timeline||[]).slice().sort((a,b)=>Number(a.sortOrder||0)-Number(b.sortOrder||0)).map((item,i)=><div className="guest-card timeline-edit" key={item.id || i}><label className="label">Jam<input className="input" value={item.time || ""} onChange={(e)=>editTimeline(i,{time:e.target.value})}/></label><label className="label">Judul<input className="input" value={item.title || ""} onChange={(e)=>editTimeline(i,{title:e.target.value})}/></label><label className="label">Deskripsi<textarea className="input" rows="2" value={item.description || ""} onChange={(e)=>editTimeline(i,{description:e.target.value})}/></label><label className="label">Sort Order<input className="input" type="number" value={item.sortOrder ?? i} onChange={(e)=>editTimeline(i,{sortOrder:e.target.value})}/></label><button className="mini-btn danger" onClick={()=>deleteTimeline(i)}>Delete</button></div>)}{!(data.timeline||[]).length && <p>Belum ada susunan acara</p>}</div></div>}
 
         {tab==="theme" && <div className="panel glass"><h2>Theme Selector</h2><div className="stats-grid">{templates.map((t)=> {
             const locked = !canUseTheme(t.id);

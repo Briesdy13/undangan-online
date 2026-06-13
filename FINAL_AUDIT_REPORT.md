@@ -1,18 +1,18 @@
 # Final Audit Report
 
-Status build: PASS
+Build: PASS
 
-## Yang diperbaiki
-- Supabase config dibuat aman untuk Vercel env.
-- SQL final dibuat: `RUN_THIS_FIRST_FINAL_ULTRA_PREMIUM.sql`.
-- FK seed galleries/guests diperbaiki dengan mengambil invitation ID berdasarkan slug.
-- 6 theme premium: Blue Islamic, Gold Luxury, Emerald Mosque, White Elegant, Dark Premium, Royal Sand.
-- Theme support database melalui field `template`.
-- Paket basic/premium ditambahkan lewat `package_tier` dan metadata template.
-- UI publik dirombak mobile-first, icon, animasi, gallery slider, floating tools.
-- Footer kecil: Powered by Briesdy Branstanata.
-- Deploy instructions ditambahkan.
+## Yang sudah dibenerin
+- Badge nama theme di halaman publik dihapus dari render publik.
+- CSS fallback `.theme-badge{display:none!important}` ditambahkan untuk memastikan tidak tampil.
+- Penutup memakai data dinamis: `family_name`, `closing_text`, `father_name`, `mother_name`.
+- SQL final menambah field database baru dan tabel `timelines`.
+- Storage layer Supabase-only dan realtime subscribe untuk invitations, galleries, guests, rsvps, wishes, checkins, timelines, songs, packages.
+- Package system field `package_tier` disiapkan.
+- Theme tetap dikontrol dari database `invitations.template`.
+- Build production sukses.
 
-## Catatan
-- Isi ENV `VITE_SUPABASE_ANON_KEY` di Vercel dengan anon key asli.
-- Jalankan SQL final sebelum test dashboard/front-end.
+## Wajib setelah upload
+- Jalankan `RUN_THIS_FIRST_FINAL_REDATABASE.sql`.
+- Isi ENV di Vercel.
+- Redeploy Vercel cache OFF.

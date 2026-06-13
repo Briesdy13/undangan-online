@@ -6,19 +6,25 @@ let packagesCache = [];
 let songsCache = [];
 let loadedRemote = false;
 let pendingWrites = [];
-const CHANNEL = "undangan-online-supabase-only";
+const CHANNEL = "undangan-online-live";
 
 export function makeId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
   const hex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).slice(1);
-  return `${hex()}${hex()}-${hex()}-4${hex().slice(1)}-${(8 + Math.floor(Math.random() * 4)).toString(16)}${hex().slice(1)}-${hex()}${hex()}${hex()}`;
+  return `${hex()}${hex()}-${hex()}-4${hex().slice(1)}-${(8 + Math.floor(Math.random()*4)).toString(16)}${hex().slice(1)}-${hex()}${hex()}${hex()}`;
 }
 
-function cleanImageUrl(src) {
-  if (!src || String(src).includes("/src/assets/")) return "/fathir.jpeg";
-  return src;
+const defaultClosing = "Merupakan suatu kehormatan dan kebahagiaan bagi kami apabila Bapak/Ibu/Saudara/i berkenan hadir dan memberikan doa restu.";
+
+function normalizeUrl(item) {
+  const url = typeof item === "string" ? item : (item?.imageUrl || item?.url || "");
+  if (!url || String(url).includes("/src/assets/")) return "/fathir.jpeg";
+  return url;
 }
-function dispatchSyncError(message) {
+function galleryToUrlList(gallery = []) {
+  return (gallery || []).map(normalizeUrl).filter(Boolean);
+}
+function notifyError(message) {
   try { window.dispatchEvent(new CustomEvent("undangan-sync-error", { detail: message })); } catch {}
 }
 function broadcastUpdate() {
@@ -26,7 +32,7 @@ function broadcastUpdate() {
     window.dispatchEvent(new CustomEvent("undangan-live-updated"));
     if ("BroadcastChannel" in window) {
       const channel = new BroadcastChannel(CHANNEL);
-      channel.postMessage({ type: "updated", at: Date.now() });
+      channel.postMessage({ type:"updated", at:Date.now() });
       channel.close();
     }
   } catch {}
@@ -35,7 +41,7 @@ function queue(promise) {
   if (!promise || typeof promise.then !== "function") return promise;
   const tracked = promise.catch((err) => {
     console.error("Supabase write error:", err);
-    dispatchSyncError(err?.message || String(err));
+    notifyError(err?.message || String(err));
     return null;
   });
   pendingWrites.push(tracked);
@@ -47,15 +53,36 @@ async function flushWrites() {
   await Promise.allSettled([...pendingWrites]);
 }
 async function run(label, promise) {
-  if (!isSupabaseReady || !supabase) throw new Error("Supabase env belum diisi");
+  if (!isSupabaseReady || !supabase) throw new Error("Supabase ENV belum diisi");
   const { data, error } = await promise;
   if (error) {
     console.error(label + " failed:", error);
-    dispatchSyncError(label + ": " + (error.message || String(error)));
+    notifyError(label + ": " + (error.message || String(error)));
     throw error;
   }
   return data;
 }
+function storageInfoFromPublicUrl(url = "") {
+  const marker = "/storage/v1/object/public/";
+  const pos = String(url).indexOf(marker);
+  if (pos < 0) return null;
+  const rest = String(url).slice(pos + marker.length).split("?")[0];
+  const [bucket, ...pathParts] = rest.split("/");
+  const path = pathParts.join("/");
+  if (!bucket || !path) return null;
+  return { bucket, path };
+}
+async function removeStorageFile(url) {
+  if (!isSupabaseReady || !supabase || !url || String(url).startsWith("/")) return;
+  const info = storageInfoFromPublicUrl(url);
+  if (!info) return;
+  await supabase.storage.from(info.bucket).remove([info.path]);
+}
+export async function deleteStorageFile(url) {
+  try { await removeStorageFile(url); } catch (e) { console.warn("delete storage failed", e); }
+}
+
+export const defaultTimeline = [];
 
 const toSnakeInvitation = (item) => ({
   id: item.id || makeId(),
@@ -72,6 +99,10 @@ const toSnakeInvitation = (item) => ({
   title: item.title || "Undangan Khitanan",
   child_name: item.childName || "NAMA ANAK",
   nickname: item.nickname || "",
+  father_name: item.fatherName || "",
+  mother_name: item.motherName || "",
+  family_name: item.familyName || "",
+  closing_text: item.closingText || defaultClosing,
   event_type: item.eventType || "Khitanan",
   event_day: item.eventDay || "",
   event_date: item.eventDate || null,
@@ -86,11 +117,13 @@ const toSnakeInvitation = (item) => ({
   bank_name: item.bankName || "",
   bank_account: item.bankAccount || "",
   bank_owner: item.bankOwner || "",
+  qris_url: item.qrisUrl || "",
   custom_domain: item.customDomain || "",
   subdomain: item.subdomain || "",
-  main_photo: cleanImageUrl(item.mainPhoto),
+  main_photo: normalizeUrl(item.mainPhoto || galleryToUrlList(item.gallery)[0] || ""),
   published_at: item.publishedAt || null,
   created_at: item.createdAt || new Date().toISOString(),
+  updated_at: new Date().toISOString(),
 });
 
 const fromSnakeInvitation = (row) => ({
@@ -108,6 +141,10 @@ const fromSnakeInvitation = (row) => ({
   title: row.title || "Undangan Khitanan",
   childName: row.child_name || "",
   nickname: row.nickname || "",
+  fatherName: row.father_name || "",
+  motherName: row.mother_name || "",
+  familyName: row.family_name || "",
+  closingText: row.closing_text || defaultClosing,
   eventType: row.event_type || "Khitanan",
   eventDay: row.event_day || "",
   eventDate: row.event_date || "",
@@ -122,64 +159,114 @@ const fromSnakeInvitation = (row) => ({
   bankName: row.bank_name || "",
   bankAccount: row.bank_account || "",
   bankOwner: row.bank_owner || "",
+  qrisUrl: row.qris_url || "",
   customDomain: row.custom_domain || "",
   subdomain: row.subdomain || "",
-  mainPhoto: cleanImageUrl(row.main_photo),
+  mainPhoto: normalizeUrl(row.main_photo || ""),
   gallery: [],
   guests: [],
   rsvps: [],
   wishes: [],
   checkins: [],
+  timeline: [],
   createdAt: row.created_at || new Date().toISOString(),
   publishedAt: row.published_at || null,
 });
 
-const toSnakeSong = (s) => ({ id: s.id || makeId(), title: s.title || "Untitled", url: s.url || "", is_active: s.active !== false, created_at: s.createdAt || new Date().toISOString() });
+const toSnakeSong = (s) => ({ id: s.id || makeId(), title: s.title || "Untitled", url: s.url || "", is_active: s.active !== false, created_at: s.createdAt || new Date().toISOString(), updated_at: new Date().toISOString() });
 const fromSnakeSong = (row) => ({ id: row.id, title: row.title || "Untitled", url: row.url || "", active: row.is_active !== false, createdAt: row.created_at });
-const toSnakePackage = (p) => ({ id: p.id || makeId(), name: p.name || "Package", price: Number(p.price || 0), tier: p.tier || ((p.name || "").toLowerCase().includes("basic") ? "basic" : "premium"), is_active: p.active !== false, created_at: p.createdAt || new Date().toISOString() });
+const toSnakePackage = (p) => ({ id: p.id || makeId(), name: p.name || "Package", price: Number(p.price || 0), tier: p.tier || ((p.name || "").toLowerCase().includes("basic") ? "basic" : "premium"), is_active: p.active !== false, created_at: p.createdAt || new Date().toISOString(), updated_at: new Date().toISOString() });
 const fromSnakePackage = (row) => ({ id: row.id, name: row.name, price: Number(row.price || 0), tier: row.tier || ((row.name || "").toLowerCase().includes("basic") ? "basic" : "premium"), active: row.is_active !== false, createdAt: row.created_at });
 
 async function hydrateInvitations(rows) {
   const items = rows.map(fromSnakeInvitation);
   const ids = items.map((i) => i.id).filter(Boolean);
   if (!ids.length) return items;
-  const [galleries, guests, rsvps, wishes, checkins] = await Promise.all([
-    run("load galleries", supabase.from("galleries").select("*").in("invitation_id", ids).order("sort_order", { ascending: true })),
-    run("load guests", supabase.from("guests").select("*").in("invitation_id", ids).order("created_at", { ascending: true })),
-    run("load rsvps", supabase.from("rsvps").select("*").in("invitation_id", ids).order("created_at", { ascending: false })),
-    run("load wishes", supabase.from("wishes").select("*").in("invitation_id", ids).order("created_at", { ascending: false })),
+  const [galleryRows, guestRows, rsvpRows, wishRows, checkRows, timelineRows] = await Promise.all([
+    run("load invitation_gallery", supabase.from("invitation_gallery").select("*").in("invitation_id", ids).order("sort_order", { ascending: true })),
+    run("load invitation_guests", supabase.from("invitation_guests").select("*").in("invitation_id", ids).order("created_at", { ascending: true })),
+    run("load invitation_rsvp", supabase.from("invitation_rsvp").select("*").in("invitation_id", ids).order("created_at", { ascending: false })),
+    run("load invitation_wishes", supabase.from("invitation_wishes").select("*").in("invitation_id", ids).order("created_at", { ascending: false })),
     run("load checkins", supabase.from("checkins").select("*").in("invitation_id", ids).order("checked_at", { ascending: false })),
+    run("load invitation_timeline", supabase.from("invitation_timeline").select("*").in("invitation_id", ids).order("sort_order", { ascending: true })),
   ]);
-  return items.map((item) => ({
-    ...item,
-    gallery: (galleries || []).filter((g) => g.invitation_id === item.id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map((g) => cleanImageUrl(g.image_url)),
-    guests: (guests || []).filter((g) => g.invitation_id === item.id).map((g) => g.guest_name),
-    rsvps: (rsvps || []).filter((r) => r.invitation_id === item.id).map((r) => ({ id:r.id, name:r.guest_name, attendance:r.attendance, total:r.total_guest, createdAt:r.created_at })),
-    wishes: (wishes || []).filter((w) => w.invitation_id === item.id).map((w) => ({ id:w.id, name:w.guest_name, message:w.message, createdAt:w.created_at })),
-    checkins: (checkins || []).filter((c) => c.invitation_id === item.id).map((c) => ({ id:c.id, name:c.guest_name, createdAt:c.checked_at })),
-  }));
+  return items.map((item) => {
+    const gallery = (galleryRows || []).filter((g) => g.invitation_id === item.id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map((g, index) => ({
+      id: g.id,
+      imageUrl: normalizeUrl(g.image_url),
+      sortOrder: Number(g.sort_order ?? index),
+      storagePath: g.storage_path || "",
+      caption: g.caption || "",
+      createdAt: g.created_at,
+    }));
+    const timeline = (timelineRows || []).filter((t) => t.invitation_id === item.id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map((t, index) => ({
+      id: t.id,
+      time: t.time_text || "",
+      title: t.title || "",
+      description: t.description || "",
+      icon: t.icon || "",
+      sortOrder: Number(t.sort_order ?? index),
+      createdAt: t.created_at,
+    }));
+    const main = item.mainPhoto && item.mainPhoto !== "/fathir.jpeg" ? item.mainPhoto : (gallery[0]?.imageUrl || item.mainPhoto || "");
+    return {
+      ...item,
+      mainPhoto: normalizeUrl(main),
+      gallery,
+      guests: (guestRows || []).filter((g) => g.invitation_id === item.id).map((g) => g.guest_name),
+      rsvps: (rsvpRows || []).filter((r) => r.invitation_id === item.id).map((r) => ({ id:r.id, name:r.guest_name, attendance:r.attendance, total:r.total_guest, message:r.message || "", createdAt:r.created_at })),
+      wishes: (wishRows || []).filter((w) => w.invitation_id === item.id).map((w) => ({ id:w.id, name:w.guest_name, message:w.message, createdAt:w.created_at })),
+      checkins: (checkRows || []).filter((c) => c.invitation_id === item.id).map((c) => ({ id:c.id, name:c.guest_name, createdAt:c.checked_at })),
+      timeline,
+    };
+  });
 }
 
 async function syncInvitationRelations(invitation) {
-  const cleanGallery = (invitation.gallery || []).map(cleanImageUrl).filter(Boolean);
-  await run("delete galleries", supabase.from("galleries").delete().eq("invitation_id", invitation.id));
-  if (cleanGallery.length) await run("insert galleries", supabase.from("galleries").insert(cleanGallery.map((imageUrl, index) => ({ invitation_id: invitation.id, image_url: imageUrl, sort_order: index }))));
-  await run("delete guests", supabase.from("guests").delete().eq("invitation_id", invitation.id));
-  if (invitation.guests?.length) await run("insert guests", supabase.from("guests").insert(invitation.guests.map((guestName) => ({ invitation_id: invitation.id, guest_name: guestName }))));
-  await run("delete rsvps", supabase.from("rsvps").delete().eq("invitation_id", invitation.id));
-  if (invitation.rsvps?.length) await run("insert rsvps", supabase.from("rsvps").insert(invitation.rsvps.map((r) => ({ invitation_id: invitation.id, guest_name: r.name, attendance: r.attendance, total_guest: r.total, created_at: r.createdAt || new Date().toISOString() }))));
-  await run("delete wishes", supabase.from("wishes").delete().eq("invitation_id", invitation.id));
-  if (invitation.wishes?.length) await run("insert wishes", supabase.from("wishes").insert(invitation.wishes.map((w) => ({ invitation_id: invitation.id, guest_name: w.name, message: w.message, created_at: w.createdAt || new Date().toISOString() }))));
-  await run("delete checkins", supabase.from("checkins").delete().eq("invitation_id", invitation.id));
-  if (invitation.checkins?.length) await run("insert checkins", supabase.from("checkins").insert(invitation.checkins.map((c) => ({ invitation_id: invitation.id, guest_name: c.name, checked_at: c.createdAt || new Date().toISOString() }))));
+  const cleanGallery = (invitation.gallery || []).map((g, index) => ({
+    id: typeof g === "object" && g.id ? g.id : makeId(),
+    invitation_id: invitation.id,
+    image_url: normalizeUrl(g),
+    caption: typeof g === "object" ? (g.caption || "") : "",
+    storage_path: typeof g === "object" ? (g.storagePath || "") : "",
+    sort_order: typeof g === "object" ? Number(g.sortOrder ?? index) : index,
+    created_at: typeof g === "object" ? (g.createdAt || new Date().toISOString()) : new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  })).filter((g) => g.image_url);
+  await run("delete invitation_gallery", supabase.from("invitation_gallery").delete().eq("invitation_id", invitation.id));
+  if (cleanGallery.length) await run("insert invitation_gallery", supabase.from("invitation_gallery").insert(cleanGallery));
+
+  await run("delete invitation_guests", supabase.from("invitation_guests").delete().eq("invitation_id", invitation.id));
+  if (invitation.guests?.length) await run("insert invitation_guests", supabase.from("invitation_guests").insert(invitation.guests.map((guestName) => ({ id:makeId(), invitation_id: invitation.id, guest_name: guestName }))));
+
+  await run("delete invitation_rsvp", supabase.from("invitation_rsvp").delete().eq("invitation_id", invitation.id));
+  if (invitation.rsvps?.length) await run("insert invitation_rsvp", supabase.from("invitation_rsvp").insert(invitation.rsvps.map((r) => ({ id:r.id || makeId(), invitation_id: invitation.id, guest_name: r.name, attendance: r.attendance, total_guest: r.total, message: r.message || "", created_at: r.createdAt || new Date().toISOString() }))));
+
+  await run("delete invitation_wishes", supabase.from("invitation_wishes").delete().eq("invitation_id", invitation.id));
+  if (invitation.wishes?.length) await run("insert invitation_wishes", supabase.from("invitation_wishes").insert(invitation.wishes.map((w) => ({ id:w.id || makeId(), invitation_id: invitation.id, guest_name: w.name, message: w.message, created_at: w.createdAt || new Date().toISOString() }))));
+
+  await run("delete invitation_timeline", supabase.from("invitation_timeline").delete().eq("invitation_id", invitation.id));
+  const cleanTimeline = (invitation.timeline || []).map((t, index) => ({
+    id: t.id || makeId(),
+    invitation_id: invitation.id,
+    time_text: t.time || "",
+    title: t.title || "",
+    description: t.description || "",
+    icon: t.icon || "",
+    sort_order: Number(t.sortOrder ?? index),
+    created_at: t.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  })).filter((t) => t.title || t.time_text || t.description);
+  if (cleanTimeline.length) await run("insert invitation_timeline", supabase.from("invitation_timeline").insert(cleanTimeline));
 }
 
 async function upsertInvitationRemote(invitation) {
   if (!isSupabaseReady || !invitation?.id || !invitation?.slug) return;
-  const clean = { ...invitation, mainPhoto: cleanImageUrl(invitation.mainPhoto), gallery: (invitation.gallery || []).map(cleanImageUrl) };
+  const clean = { ...invitation, mainPhoto: normalizeUrl(invitation.mainPhoto || galleryToUrlList(invitation.gallery)[0] || "") };
   await run("upsert invitation", supabase.from("invitations").upsert(toSnakeInvitation(clean), { onConflict: "id" }));
   await syncInvitationRelations(clean);
 }
+
 async function loadInvitationsRemote() {
   if (!isSupabaseReady) return invitationsCache;
   const data = await run("load invitations", supabase.from("invitations").select("*").order("created_at", { ascending: false }));
@@ -188,7 +275,7 @@ async function loadInvitationsRemote() {
 }
 async function loadSongsRemote() {
   if (!isSupabaseReady) return songsCache;
-  const data = await run("load songs", supabase.from("songs").select("*").order("created_at", { ascending: false }));
+  const data = await run("load songs", supabase.from("invitation_music").select("*").order("created_at", { ascending: false }));
   songsCache = data?.length ? data.map(fromSnakeSong) : [];
   return songsCache;
 }
@@ -202,14 +289,10 @@ async function loadPackagesRemote() {
 export async function bootstrapSupabaseData({ force = false } = {}) {
   if (loadedRemote && !force) return;
   loadedRemote = true;
-  try { await Promise.all([loadInvitationsRemote(), loadSongsRemote(), loadPackagesRemote()]); }
-  catch (err) { console.error("bootstrap failed", err); }
+  try { await Promise.all([loadInvitationsRemote(), loadSongsRemote(), loadPackagesRemote()]); } catch (err) { console.error("bootstrap failed", err); }
 }
 export function refreshRemoteData(callback, options = {}) {
-  flushWrites()
-    .then(() => { loadedRemote = false; return bootstrapSupabaseData({ force: options.force !== false }); })
-    .then(() => { if (typeof callback === "function") callback(); })
-    .catch((err) => { console.error("refreshRemoteData failed:", err); dispatchSyncError(err?.message || String(err)); if (typeof callback === "function") callback(); });
+  flushWrites().then(() => { loadedRemote = false; return bootstrapSupabaseData({ force: options.force !== false }); }).then(() => { if (typeof callback === "function") callback(); }).catch((err) => { console.error("refreshRemoteData failed:", err); notifyError(err?.message || String(err)); if (typeof callback === "function") callback(); });
 }
 export function subscribeLiveUpdates(callback) {
   const handler = async () => {
@@ -224,14 +307,13 @@ export function subscribeLiveUpdates(callback) {
   if (isSupabaseReady && supabase) {
     supaChannel = supabase
       .channel(`undangan-realtime-${makeId()}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "invitations" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "galleries" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "guests" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "rsvps" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "wishes" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "checkins" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "songs" }, handler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "packages" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitations" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_gallery" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_timeline" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_guests" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_rsvp" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_wishes" }, handler)
+      .on("postgres_changes", { event:"*", schema:"public", table:"invitation_music" }, handler)
       .subscribe();
   }
   return () => { window.removeEventListener("undangan-live-updated", handler); if (bc) bc.close(); if (supaChannel) supabase.removeChannel(supaChannel); };
@@ -251,6 +333,7 @@ export async function fetchInvitationBySlug(slug) {
     return item;
   } catch { return null; }
 }
+
 export function updateInvitation(id, patch) {
   invitationsCache = invitationsCache.map((item) => item.id === id ? { ...item, ...patch } : item);
   const updated = invitationsCache.find((item) => item.id === id);
@@ -259,9 +342,18 @@ export function updateInvitation(id, patch) {
   return updated;
 }
 export function addInvitation(data) {
-  const item = { id: data.id || makeId(), ownerName:"", ownerEmail:"", packageName:"Premium", packageTier:"premium", template:"blue-islamic", status:"draft", paymentStatus:"unpaid", suspended:false, title:"Undangan Khitanan", childName:"", nickname:"", eventType:"Khitanan", eventDay:"", eventDate:"", eventDateText:"", eventTime:"", addressTitle:"", addressDetail:"", mapsUrl:"", whatsapp:"", musicTitle:"", musicUrl:"", bankName:"", bankAccount:"", bankOwner:"", customDomain:"", subdomain:"", mainPhoto:"/fathir.jpeg", gallery:[], guests:[], rsvps:[], wishes:[], checkins:[], createdAt:new Date().toISOString(), ...data };
-  const exists = invitationsCache.some((x) => x.id === item.id);
-  invitationsCache = exists ? invitationsCache.map((x) => x.id === item.id ? item : x) : [item, ...invitationsCache];
+  const item = {
+    id: data.id || makeId(),
+    ownerName:"", ownerEmail:"", packageName:"Premium", packageTier:"premium", template:"blue-islamic",
+    status:"draft", paymentStatus:"unpaid", suspended:false, title:"Undangan Khitanan",
+    childName:"", nickname:"", fatherName:"", motherName:"", familyName:"KELUARGA BESAR BAPAK MUCHTAR", closingText: defaultClosing,
+    eventType:"Khitanan", eventDay:"", eventDate:"", eventDateText:"", eventTime:"",
+    addressTitle:"", addressDetail:"", mapsUrl:"", whatsapp:"", musicTitle:"", musicUrl:"",
+    bankName:"", bankAccount:"", bankOwner:"", qrisUrl:"", customDomain:"", subdomain:"",
+    mainPhoto:"", gallery:[], guests:[], rsvps:[], wishes:[], checkins:[], timeline:[],
+    createdAt:new Date().toISOString(), ...data
+  };
+  invitationsCache = invitationsCache.some((x) => x.id === item.id) ? invitationsCache.map((x) => x.id === item.id ? item : x) : [item, ...invitationsCache];
   broadcastUpdate();
   queue(upsertInvitationRemote(item));
   return item;
@@ -272,18 +364,19 @@ export function deleteInvitation(id) {
   if (isSupabaseReady) queue(run("delete invitation", supabase.from("invitations").delete().eq("id", id)));
   return invitationsCache;
 }
+
 export function addPackage(data) {
   const item = { id: data.id || makeId(), name: data.name || "Package", price: Number(data.price || 0), tier: data.tier || "premium", active: data.active !== false, createdAt:new Date().toISOString() };
   packagesCache = [item, ...packagesCache];
   broadcastUpdate();
-  if (isSupabaseReady) queue(run("upsert package", supabase.from("packages").upsert(toSnakePackage(item), { onConflict: "id" })));
+  if (isSupabaseReady) queue(run("upsert package", supabase.from("packages").upsert(toSnakePackage(item), { onConflict:"id" })));
   return item;
 }
 export function updatePackage(id, patch) {
   packagesCache = packagesCache.map((p) => p.id === id ? { ...p, ...patch } : p);
   const item = packagesCache.find((p) => p.id === id);
   broadcastUpdate();
-  if (item && isSupabaseReady) queue(run("upsert package", supabase.from("packages").upsert(toSnakePackage(item), { onConflict: "id" })));
+  if (item && isSupabaseReady) queue(run("upsert package", supabase.from("packages").upsert(toSnakePackage(item), { onConflict:"id" })));
   return item;
 }
 export function deletePackage(id) {
@@ -292,6 +385,7 @@ export function deletePackage(id) {
   if (isSupabaseReady) queue(run("delete package", supabase.from("packages").delete().eq("id", id)));
   return packagesCache;
 }
+
 function isValidMusicUrl(url = "") {
   if (!url) return true;
   const lower = url.toLowerCase();
@@ -301,10 +395,10 @@ function isValidMusicUrl(url = "") {
 export function validateMusicUrl(url = "") { return isValidMusicUrl(url); }
 export function addSong(data) {
   if (!isValidMusicUrl(data.url || "")) { alert("URL musik harus file audio langsung .mp3/.wav/.ogg atau Supabase Storage."); return null; }
-  const item = { id: data.id || makeId(), active: true, createdAt:new Date().toISOString(), ...data };
+  const item = { id: data.id || makeId(), active:true, createdAt:new Date().toISOString(), ...data };
   songsCache = [item, ...songsCache];
   broadcastUpdate();
-  if (isSupabaseReady) queue(run("upsert song", supabase.from("songs").upsert(toSnakeSong(item), { onConflict: "id" })));
+  if (isSupabaseReady) queue(run("upsert song", supabase.from("invitation_music").upsert(toSnakeSong(item), { onConflict:"id" })));
   return item;
 }
 export function updateSong(id, patch) {
@@ -312,21 +406,22 @@ export function updateSong(id, patch) {
   songsCache = songsCache.map((s) => s.id === id ? { ...s, ...patch } : s);
   const updated = songsCache.find((s) => s.id === id);
   broadcastUpdate();
-  if (updated && isSupabaseReady) queue(run("upsert song", supabase.from("songs").upsert(toSnakeSong(updated), { onConflict: "id" })));
+  if (updated && isSupabaseReady) queue(run("upsert song", supabase.from("invitation_music").upsert(toSnakeSong(updated), { onConflict:"id" })));
   return updated;
 }
 export function deleteSong(id) {
   songsCache = songsCache.filter((s) => s.id !== id);
   broadcastUpdate();
-  if (isSupabaseReady) queue(run("delete song", supabase.from("songs").delete().eq("id", id)));
+  if (isSupabaseReady) queue(run("delete song", supabase.from("invitation_music").delete().eq("id", id)));
   return songsCache;
 }
+
 function requireSupabase() { if (!isSupabaseReady) { alert("Supabase belum connect. Isi ENV Vercel/lokal."); return false; } return true; }
 export async function uploadGalleryFile(file) {
   if (!requireSupabase() || !file) return "";
-  const ext = file.name.split(".").pop();
+  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const path = `gallery/${Date.now()}-${makeId()}.${ext}`;
-  const { error } = await supabase.storage.from("invitation-gallery").upload(path, file, { upsert: true });
+  const { error } = await supabase.storage.from("invitation-gallery").upload(path, file, { upsert:false, contentType:file.type || "image/jpeg" });
   if (error) { console.error(error); alert("Upload foto gagal. Jalankan SQL policy storage."); return ""; }
   const { data } = supabase.storage.from("invitation-gallery").getPublicUrl(path);
   return data.publicUrl;
@@ -339,10 +434,10 @@ export async function uploadSongFile(file) {
   if (!ok) { alert("File lagu harus MP3/WAV/OGG."); return ""; }
   const ext = file.name.split(".").pop();
   const path = `music/${Date.now()}-${makeId()}.${ext}`;
-  const { error } = await supabase.storage.from("invitation-music").upload(path, file, { upsert: true, contentType: file.type || "audio/mpeg" });
+  const { error } = await supabase.storage.from("invitation-music").upload(path, file, { upsert:false, contentType:file.type || "audio/mpeg" });
   if (error) { console.error(error); alert("Upload lagu gagal. Jalankan SQL policy storage."); return ""; }
   const { data } = supabase.storage.from("invitation-music").getPublicUrl(path);
   return data.publicUrl;
 }
-export async function waitForSync() { await flushWrites(); loadedRemote = false; await bootstrapSupabaseData({ force: true }); }
+export async function waitForSync() { await flushWrites(); loadedRemote = false; await bootstrapSupabaseData({ force:true }); }
 export function getSupabaseStatus() { return { isSupabaseReady, totalInvitations: invitationsCache.length, totalSongs: songsCache.length, totalPackages: packagesCache.length }; }
